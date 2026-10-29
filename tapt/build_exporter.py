@@ -140,7 +140,7 @@ def run_phase(recipe, paths, target, cargo, output, phase, cwd, arguments):
     name = "tapt-exporter-" + uuid.uuid4().hex
     base = ["docker", "create", "--name", name, "--pull=missing", "--platform", PLATFORM,
             "--cpus=" + recipe["cpus"], "--memory=" + recipe["memory"],
-            "--memory-swap=" + recipe["memory"]]
+            "--memory-swap=" + recipe["memory"], "--user=" + str(os.getuid()) + ":" + str(os.getgid())]
     for key, value in recipe["environment"].items():
         base += ["-e", key + "=" + value]
     base += ["-v", str(cargo) + ":/cargo", "-v", str(target) + ":/target-app",

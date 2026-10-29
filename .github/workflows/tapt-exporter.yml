@@ -42,7 +42,8 @@ jobs:
       - name: Offline orchestration tests
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s work/vectorcraft/tapt -p 'test_*.py' -v
       - name: Restore Cargo and target caches
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: _dev/exporter-cache
           key: tapt-exporter-linux-amd64-${{ hashFiles('work/vectorcraft/tapt/build.recipe.json', 'work/vectorcraft/tapt/source.lock.json', 'work/vectorcraft/Cargo.lock', 'work/libs/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -54,6 +55,12 @@ jobs:
             --cache "$GITHUB_WORKSPACE/_dev/exporter-cache" \
             --output "$GITHUB_WORKSPACE/_dev/exporter-output" \
             --dist "$GITHUB_WORKSPACE/_dev/exporter-dist"
+      - name: Save compiler progress even if a later check fails
+        if: always() && steps.cache.outcome == 'success'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: _dev/exporter-cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Retain phase metrics even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

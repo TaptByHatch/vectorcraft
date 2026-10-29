@@ -390,3 +390,90 @@ fn colours_are_in_the_profiles_assigned_to_the_document() {
     assert!(r.warnings.iter().any(|w| w.contains("No Such Press")), "{:?}", r.warnings);
     assert!(icc_streams(&r.bytes) == [cms::icc_bytes(&working).unwrap().to_vec()]);
 }
+
+#[test]
+fn process_space_preservation_is_opt_in_and_does_not_repaint_the_document() {
+    let d = doc(ColorMode::Cmyk, &[Color::rgb(0.365, 0.773, 0.776), Color::cmyk(0.351, 0.073, 0.213, 0.019)]);
+    let before = serde_json::to_value(&d).unwrap();
+    let legacy = pdf(&d, json!({}));
+    assert!(colours(&legacy.bytes).iter().all(|(op, _)| op == "k"));
+    assert!(legacy.warnings.iter().any(|w| w.contains("RGB colours") || w.contains("RGB colour")));
+    let preserved = pdf(&d, json!({"output": {"preserveProcessSpaces": true}}));
+    let c = colours(&preserved.bytes);
+    assert_eq!(c.len(), 2);
+    assert_eq!(c[0], ("rg".into(), q8(&[0.365, 0.773, 0.776])));
+    assert_eq!(c[1], ("k".into(), q8(&[0.351, 0.073, 0.213, 0.019])));
+    assert!(!preserved.warnings.iter().any(|w| w.contains("RGB colour")));
+    assert_eq!(serde_json::to_value(&d).unwrap(), before);
+}
+
+#[test]
+fn process_space_preservation_rejects_conflicting_or_unsupported_profiles() {
+    for conflict in [
+        json!({"conversion": "destination"}),
+        json!({"conversion": "preserveNumbers"}),
+        json!({"destination": "sRGB IEC61966-2.1"}),
+        json!({"profiles": "all"}),
+        json!({"outputIntent": "Document CMYK"}),
+    ] {
+        let mut output = conflict;
+        output["preserveProcessSpaces"] = json!(true);
+        let settings: PdfSettings = serde_json::from_value(json!({"output": output})).unwrap();
+        assert!(settings.check().is_err(), "{settings:?}");
+    }
+    for standard in ["pdfX1a", "pdfX3", "pdfX4", "pdfA2b"] {
+        let settings: PdfSettings = serde_json::from_value(json!({"standard": standard,
+            "output": {"preserveProcessSpaces": true}}))
+        .unwrap();
+        assert!(settings.check().is_err());
+    }
+    let mut d = doc(ColorMode::Cmyk, &[Color::rgb(0.2, 0.3, 0.4)]);
+    d.color_profiles.rgb = Some(SRGB.into());
+    let settings: PdfSettings = serde_json::from_value(json!({"output": {"preserveProcessSpaces": true}})).unwrap();
+    assert!(export(&d, &PdfOptions { settings, ..Default::default() }).is_err());
+}
+
+#[test]
+fn process_space_preservation_keeps_cmyk_blending_and_overprint() {
+    let mut d = doc(ColorMode::Cmyk, &[Color::rgb(0.3, 0.7, 0.4), Color::cmyk(0.1, 0.2, 0.3, 0.4)]);
+    let id = d.layers[0].children().unwrap()[1].id;
+    let top = d.node_mut(id).unwrap();
+    top.blend = vectorcraft_color::BlendMode::Multiply;
+    top.opacity = 0.6;
+    *top.appearance.items[0].overprint_mut() = true;
+    for preserve in [false, true] {
+        let r = pdf(&d, json!({"output": {"preserveProcessSpaces": preserve}}));
+        let t = String::from_utf8_lossy(&r.bytes).replace(' ', "");
+        for required in ["/CS/DeviceCMYK", "/BM/Multiply", "/optrue", "/OPM1"] {
+            assert!(t.contains(required), "preserve={preserve}, missing {required}: {t}");
+        }
+        assert!(!t.contains("/CS/DeviceRGB"));
+    }
+}
+
+#[test]
+fn continuous_process_components_are_independent_of_space_and_legacy_defaults() {
+    let mut d = doc(ColorMode::Cmyk, &[Color::rgb(0.365, 0.773, 0.776), Color::cmyk(0.351, 0.073, 0.213, 0.019)]);
+    let id = d.layers[0].children().unwrap()[1].id;
+    *d.node_mut(id).unwrap().appearance =
+        Appearance::basic(Paint::solid(Color::cmyk(0.351, 0.073, 0.213, 0.019)), Paint::solid(Color::cmyk(0.708, 0.648, 0.638, 0.677)), 0.25);
+    for preserve in [false, true] {
+        for continuous in [false, true] {
+            let r = pdf(
+                &d,
+                json!({"output": {"preserveProcessSpaces": preserve,
+                "continuousProcessComponents": continuous}}),
+            );
+            let c = colours(&r.bytes);
+            assert_eq!(c[0].0, if preserve { "rg" } else { "k" });
+            if preserve {
+                let expected = if continuous { vec![0.365, 0.773, 0.776] } else { q8(&[0.365, 0.773, 0.776]) };
+                assert_eq!(c[0].1, expected);
+            }
+            let expected = if continuous { vec![0.351, 0.073, 0.213, 0.019] } else { q8(&[0.351, 0.073, 0.213, 0.019]) };
+            assert_eq!(c[1], ("k".into(), expected));
+            let t = String::from_utf8_lossy(&r.bytes);
+            assert_eq!(t.contains("0.708 0.648 0.638 0.677 K"), continuous);
+        }
+    }
+}

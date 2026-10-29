@@ -7,15 +7,19 @@ impl Exporter<'_> {
     /// document's colour spaces, so the file carries press values.
     fn col(&mut self, c: &Color) -> krilla::color::Color {
         let cmyk_doc = self.doc.color_mode == vectorcraft_doc::ColorMode::Cmyk;
-        if let (true, true, Color::Rgb { r, g, b }) = (cmyk_doc, self.convert, c) {
-            self.rgb_in_cmyk.colours.insert([r.to_bits(), g.to_bits(), b.to_bits()]);
+        if !self.out.preserve_process_spaces {
+            if let (true, true, Color::Rgb { r, g, b }) = (cmyk_doc, self.convert, c) {
+                self.rgb_in_cmyk.colours.insert([r.to_bits(), g.to_bits(), b.to_bits()]);
+            }
+        } else if matches!(c, Color::Lab { .. }) {
+            self.warn("output.preserveProcessSpaces does not preserve Lab colours");
         }
         let c = self.out.color(c, self.intent, cmyk_doc, self.convert);
         if let (Color::Rgb { .. }, Some(note)) = (c, &self.out.srgb_note) {
             let note = note.clone();
             self.warn(note);
         }
-        color(&c)
+        color(&c, self.out.continuous_process_components)
     }
 
     /// The Separation colour space of spot swatch `name` (its CMYK equivalent is the alternate

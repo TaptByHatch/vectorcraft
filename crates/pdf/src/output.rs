@@ -57,6 +57,10 @@ pub(crate) struct ColorOut {
     /// Why colours aren't in a profile assigned to the document (warnings).
     pub profile_notes: Vec<String>,
     dest: Option<Dest>,
+    /// Keep RGB/CMYK paint spaces, without changing transparency blending.
+    pub preserve_process_spaces: bool,
+    /// Do not reduce RGB/CMYK fill and stroke components to bytes.
+    pub continuous_process_components: bool,
     /// Colours are written in ICC-based colour spaces.
     pub tagged: bool,
     /// The CMYK profile that tags CMYK colours.
@@ -104,6 +108,8 @@ impl Default for ColorOut {
             source,
             profile_notes: vec![],
             dest: None,
+            preserve_process_spaces: false,
+            continuous_process_components: false,
             tagged: false,
             cmyk_profile,
             srgb_note: None,
@@ -182,6 +188,17 @@ fn destination(set: &PdfSettings, mode: ColorMode, source: &Cms) -> Result<Optio
 
 /// Refuse a destination profile that isn't there (when converting).
 pub(crate) fn check(set: &PdfSettings) -> Result<(), PdfError> {
+    if set.output.preserve_process_spaces
+        && (set.standard != Standard::None
+            || set.output.conversion != ColorConversion::None
+            || !set.output.destination.trim().is_empty()
+            || set.output.profiles != ProfileInclusion::None
+            || !set.output.output_intent.trim().is_empty())
+    {
+        return Err(PdfError::BadSetting(
+            "output.preserveProcessSpaces requires no standard, conversion, destination, profile inclusion or output-intent profile".into(),
+        ));
+    }
     // A blank destination is the document's own profile, which is always there.
     if !set.output.destination.trim().is_empty() {
         destination(set, ColorMode::Rgb, &cms::active())?;
@@ -214,9 +231,20 @@ pub(crate) fn warnings(set: &PdfSettings) -> Vec<String> {
 impl ColorOut {
     /// How `set` writes the colours of `doc` (its colour spaces, [`document_cms`], are the source).
     pub(crate) fn new(doc: &Document, set: &PdfSettings) -> Result<Self, PdfError> {
+        check(set)?;
+        if set.output.preserve_process_spaces && !doc.color_profiles.is_empty() {
+            return Err(PdfError::BadSetting("output.preserveProcessSpaces does not support assigned document profiles".into()));
+        }
         let (source, profile_notes) = document_cms(doc);
         let cmyk_profile = source.settings().cmyk.clone();
-        let mut out = Self { source, profile_notes, cmyk_profile, ..Self::default() };
+        let mut out = Self {
+            source,
+            profile_notes,
+            cmyk_profile,
+            preserve_process_spaces: set.output.preserve_process_spaces,
+            continuous_process_components: set.output.continuous_process_components,
+            ..Self::default()
+        };
         let source = out.source.clone();
         let st = source.settings();
         if let Some((name, model)) = destination(set, doc.color_mode, &source)? {
@@ -275,7 +303,10 @@ impl ColorOut {
         let s = &self.source;
         let c = match &self.dest {
             Some(d) if convert => d.convert(s, c, intent),
-            _ if cmyk_doc && matches!(c, Color::Rgb { .. } | Color::Lab { .. }) => {
+            _ if cmyk_doc
+                && matches!(c, Color::Rgb { .. } | Color::Lab { .. })
+                && (!self.preserve_process_spaces || matches!(c, Color::Lab { .. })) =>
+            {
                 let [c, m, y, k] = s.to_cmyk(c, intent);
                 Color::Cmyk { c, m, y, k }
             }

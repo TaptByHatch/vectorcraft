@@ -356,6 +356,12 @@ pub const DOCUMENT_CMYK: &str = "Document CMYK";
 #[serde(default, rename_all = "camelCase")]
 pub struct OutputSettings {
     pub conversion: ColorConversion,
+    /// Opt in to retaining RGB/CMYK paint spaces, independently of the document's
+    /// transparency blend space. Only untagged process-space output is supported.
+    pub preserve_process_spaces: bool,
+    /// Independently opt in to continuous RGB/CMYK fill and stroke components.
+    /// The default retains the writer's legacy byte quantization.
+    pub continuous_process_components: bool,
     /// Destination profile name (empty: the document's profile; [`DOCUMENT_CMYK`]: the CMYK
     /// profile in effect, whatever the document's colour mode).
     pub destination: String,

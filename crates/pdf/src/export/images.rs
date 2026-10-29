@@ -19,7 +19,7 @@ impl Exporter<'_> {
         let out = self.out.clone();
         let img = doc.image_blob(im).filter(|_| !self.left_out.contains(key)).and_then(|blob| {
             let cmyk_image = blob.is_cmyk();
-            if !cmyk_image && self.convert && doc.color_mode == vectorcraft_doc::ColorMode::Cmyk {
+            if !cmyk_image && self.convert && !out.preserve_process_spaces && doc.color_mode == vectorcraft_doc::ColorMode::Cmyk {
                 self.rgb_in_cmyk.images.insert(key.to_string());
             }
             let r = if cmyk_image {

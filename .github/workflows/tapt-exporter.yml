@@ -1,0 +1,104 @@
+name: Tapt native exporter
+
+on:
+  push:
+    branches: [tapt-exporter]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tapt-exporter-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'TaptByHatch/vectorcraft' && github.ref == 'refs/heads/tapt-exporter'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout patched VectorCraft
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: work/vectorcraft
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read patched library revision
+        id: libs
+        run: |
+          pin=$(cat work/vectorcraft/tapt/libs-revision.txt)
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || { echo 'Expected full patched craft-libs commit'; exit 1; }
+          echo "revision=$pin" >> "$GITHUB_OUTPUT"
+      - name: Checkout patched sibling libraries
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: TaptByHatch/craft-libs
+          ref: ${{ steps.libs.outputs.revision }}
+          path: work/libs
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Offline orchestration tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s work/vectorcraft/tapt -p 'test_*.py' -v
+      - name: Restore Cargo and target caches
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: _dev/exporter-cache
+          key: tapt-exporter-linux-amd64-${{ hashFiles('work/vectorcraft/tapt/build.recipe.json', 'work/vectorcraft/tapt/source.lock.json', 'work/vectorcraft/Cargo.lock', 'work/libs/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            tapt-exporter-linux-amd64-${{ hashFiles('work/vectorcraft/tapt/build.recipe.json', 'work/vectorcraft/tapt/source.lock.json', 'work/vectorcraft/Cargo.lock', 'work/libs/Cargo.lock') }}-
+      - name: Build and run all four native test groups
+        run: |
+          python3 work/vectorcraft/tapt/build_exporter.py \
+            --cache "$GITHUB_WORKSPACE/_dev/exporter-cache" \
+            --output "$GITHUB_WORKSPACE/_dev/exporter-output" \
+            --dist "$GITHUB_WORKSPACE/_dev/exporter-dist"
+      - name: Retain phase metrics even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: exporter-metrics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _dev/exporter-output/build-metrics.json
+          if-no-files-found: warn
+      - name: Pass tested release assets to publisher
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: exporter-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            _dev/exporter-dist/exporter-linux-amd64.tar.gz
+            _dev/exporter-dist/SHA256SUMS
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.repository == 'TaptByHatch/vectorcraft' && github.ref == 'refs/heads/tapt-exporter'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download tested release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: exporter-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _dev/exporter-dist
+      - name: Publish new commit-addressed release without replacing existing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: TaptByHatch/vectorcraft
+        working-directory: _dev/exporter-dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check SHA256SUMS
+          tag="exporter-${GITHUB_SHA}"
+          # Creating the ref fails if it already exists. Never move a tag,
+          # delete a release, or use --clobber, including on workflow reruns.
+          gh api --method POST "repos/${GH_REPO}/git/refs" \
+            -f "ref=refs/tags/${tag}" -f "sha=${GITHUB_SHA}"
+          gh release create "$tag" --verify-tag --draft --title "$tag" \
+            --notes 'Linux amd64 implementation build only. Native Rust tests passed. Fresh server packaged-worker, paired-consumer and retained-case qualification remains mandatory before consumption. No output-fidelity qualification is claimed.' \
+            exporter-linux-amd64.tar.gz SHA256SUMS
+          # Assets are complete before the release becomes publicly downloadable.
+          gh release edit "$tag" --draft=false --latest=false

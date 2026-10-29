@@ -1,0 +1,59 @@
+{
+  "schema": "tapt-native-exporter-build/1",
+  "builder_image": "sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082",
+  "platform": "linux/arm64",
+  "sources": [
+    {
+      "name": "vectorcraft",
+      "cache": "vectorcraft-precision-source",
+      "repository": "https://github.com/storytold/vectorcraft",
+      "commit": "68b68a30acad9b3d8a72802b35f43b82e2bd7d3a",
+      "patches": [
+        {
+          "file": "preserve-process-spaces.patch",
+          "sha256": "853df239116b76a949f15b65df81681729b1737ab6162b0a91d6f6d16d900b77"
+        },
+        {
+          "file": "continuous-process-components.patch",
+          "sha256": "55b4fbc7b84e76d5ecc3f78a4543ef9140e30574b55f364ec371295fa23dba56"
+        },
+        {
+          "file": "writer-dependency.patch",
+          "sha256": "82f456fcccbc5bdee55fc2c95d1d0b701fa77c4f36c4b1ba70f6567540b0aa5d"
+        }
+      ],
+      "patched_files": {
+        "Cargo.toml": "415af3fd2f57dcfea45838089c048edab09d92f1b8fed3f3c291dd5a05e5b82e",
+        "Cargo.lock": "3683faf20327d1e1b66af0e81dd30b12010e3e7b1bffc047416af446536f2860",
+        "crates/pdf/src/settings.rs": "e61b437470e1f3bea51b1a429afa8eac23f8edec61d098bfbb7824ba12a2fc48",
+        "crates/pdf/src/output.rs": "53a604c3e1867d679334e20686c9cee056f483753e9ce1aaa790fd633ddfb8e1",
+        "crates/pdf/src/export/paint.rs": "431ace5709a7d3548fb8612b35676c201d91669acf644532730071aa424d2f86",
+        "crates/pdf/src/export/images.rs": "0404c8ca34420721d5c8c665f8c47d02e1060a1f59e430899ef640185c5f6c52",
+        "crates/pdf/src/export/exporter.rs": "916ba75a297706715b2df4e67bd5a70b9bf8cb534a8e691bf4fa0dca8fa5db65",
+        "crates/pdf/src/tests/output.rs": "b15af118b5d5a648c7fa4479eba0457ed6a437b14573630043a69e296d0abf22",
+        "crates/pdf/src/tests/import_lines.rs": "803c2183d575d490828377812fcf032fdb376524c6299814c033160c792ae31c"
+      }
+    },
+    {
+      "name": "libs",
+      "cache": "vectorcraft-precision-libs",
+      "repository": "https://github.com/storytold/craft-libs",
+      "commit": "92d392cff132eaf53e13afff77f38b5c11b73aa0",
+      "patches": [
+        {
+          "file": "normalized-process-components.patch",
+          "sha256": "8c4eaa5f165a06967bca1470f884c145f4a6fbdf2fff30a03b3f915dc3fd3714"
+        }
+      ],
+      "patched_files": {
+        "vendor/krilla/src/graphics/color.rs": "ab6b68eb9d06c0be070cb20db2a8f7d9aeeec40152e360daff9a294726212ff8",
+        "vendor/krilla/src/graphics/shading_function.rs": "e9bddbb4c8355faa22c71b3244b2635eaef805d877a75f947d9f041aae3aa9b3",
+        "crates/menu/Cargo.toml": "6c0b3deb84e88775f877ef90364b8d18e947e3bbfe15a30e1e7ad2a8bd58b51a"
+      }
+    }
+  ],
+  "output_settings": {
+    "preserveProcessSpaces": true,
+    "continuousProcessComponents": true
+  }
+}

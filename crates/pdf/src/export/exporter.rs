@@ -163,8 +163,10 @@ pub(super) fn q(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-pub(super) fn color(c: &Color) -> krilla::color::Color {
+pub(super) fn color(c: &Color, continuous: bool) -> krilla::color::Color {
     match *c {
+        Color::Rgb { r, g, b } if continuous => rgb::Color::from_normalized(norm(r), norm(g), norm(b)).into(),
+        Color::Cmyk { c, m, y, k } if continuous => cmyk::Color::from_normalized(norm(c), norm(m), norm(y), norm(k)).into(),
         Color::Rgb { r, g, b } => rgb::Color::new(q(r), q(g), q(b)).into(),
         Color::Cmyk { c, m, y, k } => cmyk::Color::new(q(c), q(m), q(y), q(k)).into(),
         // VectorCraft grey is ink coverage (0 = white); PDF DeviceGray is lightness.

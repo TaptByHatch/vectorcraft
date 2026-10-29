@@ -1,0 +1,24 @@
+{
+  "schema": "tapt-exporter-recipe/1",
+  "version": "0.18.0",
+  "semantics": "locked-cli-and-process-writer-v1",
+  "amd64_builder_image": "rust:1.95-slim-bookworm@sha256:6f9e63259f12e1e599296f5ecfed2bae46de4af0ee0525dd8b89c046e236d5c5",
+  "cpus": "2",
+  "memory": "4g",
+  "environment": {
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_HOME": "/cargo",
+    "CARGO_TARGET_DIR": "/target-app",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_INCREMENTAL": "0"
+  },
+  "cargo": ["cargo", "--config", "profile.dev.package.vectorcraft-engine.opt-level=0"],
+  "build": ["build", "--locked", "-p", "vectorcraft-cli"],
+  "tests": [
+    ["/work/vectorcraft", "test", "--locked", "-p", "vectorcraft-pdf", "tests::output::"],
+    ["/work/vectorcraft", "test", "--locked", "-p", "vectorcraft-pdf", "tests::import_lines::"],
+    ["/work/vectorcraft", "test", "--locked", "-p", "vectorcraft-pdf", "words_set_apart_by_spaces_tracked_past_an_em_keep_their_place"],
+    ["/work/libs", "test", "--locked", "-p", "craft-pdf", "--features", "write,interpret", "--test", "print_color"]
+  ]
+}

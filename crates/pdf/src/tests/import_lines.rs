@@ -228,17 +228,28 @@ fn words_set_ems_apart_beside_the_spaces_the_file_draws_keep_their_place() {
 
 #[test]
 fn words_set_ems_apart_beside_a_drawn_no_break_or_thin_space_keep_their_place() {
-    // As above, the file drawing a no-break space and a thin space alone, with a gap on each side.
+    // Drawn spaces retain their Unicode characters and the following glyph positions,
+    // including UTF-8 byte offsets after both multibyte letters and multibyte spaces.
     let (x1, x2) = (48.0, 84.0);
-    let lines: &[(f32, f32, f32, &str)] =
-        &[(20.0, 50.0, 10.0, "ab"), (36.0, 50.0, 10.0, "\u{a0}"), (x1, 50.0, 10.0, "cd"), (70.0, 50.0, 10.0, "\u{2009}"), (x2, 50.0, 10.0, "ef")];
-    let t = texts(&import(&source_sans(lines)).unwrap());
-    assert_eq!(t.len(), 1);
-    assert_eq!(t[0].plain_text(), "ab\u{a0}cd\u{2009}ef");
-    let laid = vectorcraft_text::layout(vectorcraft_text::FontDb::global(), &t[0]);
-    let at = |byte: usize| (t[0].xf * laid.glyphs.iter().find(|g| g.byte == byte).unwrap().origin).x;
-    assert!((at(4) - f64::from(x1)).abs() < 0.05, "the second word starts where the file has it: {} vs {x1}", at(4));
-    assert!((at(9) - f64::from(x2)).abs() < 0.05, "the third word starts where the file has it: {} vs {x2}", at(9));
+    for (first, space1, space2, expected, second_byte, third_byte) in [
+        ("ab", "\u{a0}", "\u{2009}", "ab\u{a0}cd\u{2009}ef", 4, 9),
+        ("éb", "\u{202f}", "\u{2009}", "éb\u{202f}cd\u{2009}ef", 6, 11),
+    ] {
+        let lines: &[(f32, f32, f32, &str)] = &[
+            (20.0, 50.0, 10.0, first),
+            (36.0, 50.0, 10.0, space1),
+            (x1, 50.0, 10.0, "cd"),
+            (70.0, 50.0, 10.0, space2),
+            (x2, 50.0, 10.0, "ef"),
+        ];
+        let t = texts(&import(&source_sans(lines)).unwrap());
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].plain_text(), expected);
+        let laid = vectorcraft_text::layout(vectorcraft_text::FontDb::global(), &t[0]);
+        let at = |byte: usize| (t[0].xf * laid.glyphs.iter().find(|g| g.byte == byte).unwrap().origin).x;
+        assert!((at(second_byte) - f64::from(x1)).abs() < 0.05, "the second word starts where the file has it: {} vs {x1}", at(second_byte));
+        assert!((at(third_byte) - f64::from(x2)).abs() < 0.05, "the third word starts where the file has it: {} vs {x2}", at(third_byte));
+    }
 }
 
 /// A document of area type `text` (Source Sans 3, 10 pt) `width` wide at (20, 30).

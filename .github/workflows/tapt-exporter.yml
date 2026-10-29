@@ -15,7 +15,15 @@ concurrency:
 jobs:
   build:
     if: github.repository == 'TaptByHatch/vectorcraft' && github.ref == 'refs/heads/tapt-exporter'
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
       - name: Checkout patched VectorCraft
@@ -46,12 +54,13 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: _dev/exporter-cache
-          key: tapt-exporter-linux-amd64-${{ hashFiles('work/vectorcraft/tapt/build.recipe.json', 'work/vectorcraft/tapt/source.lock.json', 'work/vectorcraft/Cargo.lock', 'work/libs/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: tapt-exporter-linux-${{ matrix.arch }}-${{ hashFiles('work/vectorcraft/tapt/build.recipe.json', 'work/vectorcraft/tapt/source.lock.json', 'work/vectorcraft/Cargo.lock', 'work/libs/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            tapt-exporter-linux-amd64-${{ hashFiles('work/vectorcraft/tapt/build.recipe.json', 'work/vectorcraft/tapt/source.lock.json', 'work/vectorcraft/Cargo.lock', 'work/libs/Cargo.lock') }}-
+            tapt-exporter-linux-${{ matrix.arch }}-${{ hashFiles('work/vectorcraft/tapt/build.recipe.json', 'work/vectorcraft/tapt/source.lock.json', 'work/vectorcraft/Cargo.lock', 'work/libs/Cargo.lock') }}-
       - name: Build and run all four native test groups
         run: |
           python3 work/vectorcraft/tapt/build_exporter.py \
+            --platform linux/${{ matrix.arch }} \
             --cache "$GITHUB_WORKSPACE/_dev/exporter-cache" \
             --output "$GITHUB_WORKSPACE/_dev/exporter-output" \
             --dist "$GITHUB_WORKSPACE/_dev/exporter-dist"
@@ -65,15 +74,15 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: exporter-metrics-${{ github.run_id }}-${{ github.run_attempt }}
+          name: exporter-metrics-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: _dev/exporter-output/build-metrics.json
           if-no-files-found: warn
       - name: Pass tested release assets to publisher
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: exporter-release-${{ github.run_id }}-${{ github.run_attempt }}
+          name: exporter-release-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            _dev/exporter-dist/exporter-linux-amd64.tar.gz
+            _dev/exporter-dist/exporter-linux-${{ matrix.arch }}.tar.gz
             _dev/exporter-dist/SHA256SUMS
           if-no-files-found: error
 
@@ -88,7 +97,8 @@ jobs:
       - name: Download tested release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: exporter-release-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: exporter-release-*-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: false
           path: _dev/exporter-dist
       - name: Publish new commit-addressed release without replacing existing assets
         env:
@@ -98,14 +108,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum --check SHA256SUMS
+          # Keep each producer's checksum file isolated until both are verified.
+          mkdir publish
+          for arch in amd64 arm64; do
+            source="exporter-release-${arch}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            archive="exporter-linux-${arch}.tar.gz"
+            test "$(wc -l < "$source/SHA256SUMS")" -eq 1
+            grep -Ex "[0-9a-f]{64}  exporter-linux-${arch}\.tar\.gz" "$source/SHA256SUMS"
+            (cd "$source" && sha256sum --strict --check SHA256SUMS)
+            cat "$source/$archive" > "publish/$archive"
+            cat "$source/SHA256SUMS" >> publish/SHA256SUMS
+          done
+          (cd publish && sha256sum --strict --check SHA256SUMS)
           tag="exporter-${GITHUB_SHA}"
           # Creating the ref fails if it already exists. Never move a tag,
           # delete a release, or use --clobber, including on workflow reruns.
           gh api --method POST "repos/${GH_REPO}/git/refs" \
             -f "ref=refs/tags/${tag}" -f "sha=${GITHUB_SHA}"
           gh release create "$tag" --verify-tag --draft --title "$tag" \
-            --notes 'Linux amd64 implementation build only. Native Rust tests passed. Fresh server packaged-worker, paired-consumer and retained-case qualification remains mandatory before consumption. No output-fidelity qualification is claimed.' \
-            exporter-linux-amd64.tar.gz SHA256SUMS
+            --notes 'Linux amd64 and arm64 implementation builds only. Native Rust tests passed on each architecture. Fresh server packaged-worker, paired-consumer and retained-case qualification remains mandatory before consumption. No output-fidelity qualification is claimed.' \
+            publish/exporter-linux-amd64.tar.gz publish/exporter-linux-arm64.tar.gz publish/SHA256SUMS
           # Assets are complete before the release becomes publicly downloadable.
           gh release edit "$tag" --draft=false --latest=false

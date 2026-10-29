@@ -20,6 +20,8 @@ import uuid
 
 HERE = Path(__file__).resolve().parent
 PLATFORM = "linux/amd64"
+ARM64_BUILDER_IMAGE = "rust:1.95-slim-bookworm@sha256:d81582a30689ffafaa04e2a9e117d39cc5032cb12eee8d6a5f26b1f215c1e3e8"
+ELF_MACHINES = {"linux/amd64": b"\x3e\x00", "linux/arm64": b"\xb7\x00"}
 REPOSITORY = "TaptByHatch/vectorcraft"
 FILES = ("vectorcraft-cli", "exporter-build.json", "build-metrics.json", "THIRD-PARTY-NOTICES.txt")
 MAX_NOTICES = 32 * 1024 * 1024
@@ -62,12 +64,18 @@ def verify_sources(lock, paths, commit, libs_commit):
                 raise ValueError("patched file hash mismatch: " + source["name"] + "/" + name)
 
 
-def build_identity(lock, recipe, paths):
+def builder_image(recipe, platform):
+    if platform not in ELF_MACHINES:
+        raise ValueError("unsupported exporter platform: " + platform)
+    return recipe["amd64_builder_image"] if platform == PLATFORM else ARM64_BUILDER_IMAGE
+
+
+def build_identity(lock, recipe, paths, platform=PLATFORM):
     # Keep exactly the worker exporter/build.py identity, including historical
     # upstream revisions and patch hashes, but excluding local cache directory names.
     return dict(
-        platform=PLATFORM,
-        builder_image=recipe["amd64_builder_image"],
+        platform=platform,
+        builder_image=builder_image(recipe, platform),
         recipe=recipe,
         sources=[{key: value for key, value in source.items() if key != "cache"}
                  for source in lock["sources"]],
@@ -135,10 +143,11 @@ def write_notices(lock, paths, cargo, output):
     (output / "THIRD-PARTY-NOTICES.txt").write_text("".join(sections), encoding="utf-8")
 
 
-def run_phase(recipe, paths, target, cargo, output, phase, cwd, arguments):
+def run_phase(recipe, paths, target, cargo, output, phase, cwd, arguments, *, platform=PLATFORM):
     """Use a fresh cgroup per phase; inspect it even if an OOM kills its shell."""
     name = "tapt-exporter-" + uuid.uuid4().hex
-    base = ["docker", "create", "--name", name, "--pull=missing", "--platform", PLATFORM,
+    image = builder_image(recipe, platform)
+    base = ["docker", "create", "--name", name, "--pull=missing", "--platform", platform,
             "--cpus=" + recipe["cpus"], "--memory=" + recipe["memory"],
             "--memory-swap=" + recipe["memory"], "--user=" + str(os.getuid()) + ":" + str(os.getgid())]
     for key, value in recipe["environment"].items():
@@ -158,7 +167,7 @@ def run_phase(recipe, paths, target, cargo, output, phase, cwd, arguments):
               f'> /build-output/{phase}.memory-peak 2>/dev/null; '
               f'cat /sys/fs/cgroup/memory.events '
               f'> /build-output/{phase}.memory-events 2>/dev/null; exit "$result"')
-    subprocess.run(base + [recipe["amd64_builder_image"], "sh", "-c", script,
+    subprocess.run(base + [image, "sh", "-c", script,
                           "measure", *recipe["cargo"], *arguments], check=True)
     start = time.monotonic()
     try:
@@ -182,13 +191,13 @@ def run_phase(recipe, paths, target, cargo, output, phase, cwd, arguments):
         subprocess.run(["docker", "rm", "-f", name], check=True)
 
 
-def compile_exporter(lock, recipe, paths, output, target, cargo, github):
+def compile_exporter(lock, recipe, paths, output, target, cargo, github, platform=PLATFORM):
     for path in (output, target, cargo):
         path.mkdir(parents=True, exist_ok=True)
     # Never leave a stale successful receipt available after a failed rebuild.
     for name in FILES:
         (output / name).unlink(missing_ok=True)
-    identity = build_identity(lock, recipe, paths)
+    identity = build_identity(lock, recipe, paths, platform)
     metrics = []
     operations = [("/work/vectorcraft", recipe["build"]),
                   *[(test[0], test[1:]) for test in recipe["tests"]]]
@@ -196,7 +205,7 @@ def compile_exporter(lock, recipe, paths, output, target, cargo, github):
         raise ValueError("exactly four native test groups are required")
     for index, (cwd, arguments) in enumerate(operations):
         phase = "build" if index == 0 else "test-" + str(index)
-        metric = run_phase(recipe, paths, target, cargo, output, phase, cwd, arguments)
+        metric = run_phase(recipe, paths, target, cargo, output, phase, cwd, arguments, platform=platform)
         metrics.append(metric)
         write_json(output / "build-metrics.json", metrics)
         if metric["returncode"] or metric["oom_killed"]:
@@ -206,18 +215,18 @@ def compile_exporter(lock, recipe, paths, output, target, cargo, github):
         if index and not metric["tests_passed"]:
             raise ValueError("exporter_rust_test_filter_exercised_no_tests: " + phase)
     # The locked build must not have changed either Cargo.lock.
-    if build_identity(lock, recipe, paths) != identity:
+    if build_identity(lock, recipe, paths, platform) != identity:
         raise ValueError("build identity changed during compilation")
     binary = output / "vectorcraft-cli"
     shutil.copy2(target / "debug/vectorcraft-cli", binary)
     with binary.open("rb") as stream:
         header = stream.read(20)
-    if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\x3e\x00":
-        raise ValueError("exporter binary is not Linux amd64 ELF")
+    if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != ELF_MACHINES[platform]:
+        raise ValueError("exporter binary is not Linux " + platform.split("/")[1] + " ELF")
     write_notices(lock, paths, cargo, output)
     receipt = dict(
-        schema=lock["schema"], version=recipe["version"], platform=PLATFORM,
-        builder_image=recipe["amd64_builder_image"],
+        schema=lock["schema"], version=recipe["version"], platform=platform,
+        builder_image=identity["builder_image"],
         source_lock_sha256=sha(HERE / "source.lock.json"), identity=identity,
         binary_sha256=sha(binary), output_settings=lock["output_settings"],
         ci=dict(pipeline_uuid=None, step_uuid=None, commit=None), github=github,
@@ -228,9 +237,11 @@ def compile_exporter(lock, recipe, paths, output, target, cargo, github):
     return receipt
 
 
-def package(output, dist):
+def package(output, dist, platform=PLATFORM):
+    if platform not in ELF_MACHINES:
+        raise ValueError("unsupported exporter platform: " + platform)
     dist.mkdir(parents=True, exist_ok=True)
-    archive = dist / "exporter-linux-amd64.tar.gz"
+    archive = dist / ("exporter-" + platform.replace("/", "-") + ".tar.gz")
     with tarfile.open(archive, "w:gz") as tar:
         for name in FILES:
             tar.add(output / name, arcname=name, recursive=False)
@@ -242,6 +253,7 @@ def main():
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--dist", type=Path, required=True)
+    parser.add_argument("--platform", choices=tuple(ELF_MACHINES), default=PLATFORM)
     args = parser.parse_args()
     if os.environ.get("GITHUB_REPOSITORY") != REPOSITORY:
         raise ValueError("only the authorized fork may publish this exporter")
@@ -255,8 +267,8 @@ def main():
     verify_sources(lock, paths, commit, libs_commit)
     github = dict(repository=REPOSITORY, commit=commit, run_id=run_id, libs_commit=libs_commit)
     compile_exporter(lock, recipe, paths, args.output.resolve(),
-                     args.cache.resolve() / "target", args.cache.resolve() / "cargo", github)
-    package(args.output.resolve(), args.dist.resolve())
+                     args.cache.resolve() / "target", args.cache.resolve() / "cargo", github, args.platform)
+    package(args.output.resolve(), args.dist.resolve(), args.platform)
 
 
 if __name__ == "__main__":

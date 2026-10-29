@@ -14,6 +14,10 @@ import build_exporter as build
 
 
 class ExporterTests(unittest.TestCase):
+    platform = "linux/amd64"
+    image = "rust:1.95-slim-bookworm@sha256:6f9e63259f12e1e599296f5ecfed2bae46de4af0ee0525dd8b89c046e236d5c5"
+    machine = b"\x3e\x00"
+
     def setUp(self):
         scratch = Path(os.environ.get("GITHUB_WORKSPACE", build.HERE.parent)) / "_dev"
         scratch.mkdir(exist_ok=True)
@@ -31,32 +35,58 @@ class ExporterTests(unittest.TestCase):
         self.output.mkdir()
         (self.target / "debug").mkdir(parents=True)
         binary = self.target / "debug/vectorcraft-cli"
-        binary.write_bytes(b"\x7fELF\x02\x01" + bytes(12) + b"\x3e\x00synthetic-test-binary")
+        binary.write_bytes(b"\x7fELF\x02\x01" + bytes(12) + self.machine + b"synthetic-test-binary")
         binary.chmod(0o755)
         self.github = dict(repository=build.REPOSITORY, commit="a" * 40,
                            run_id="123", libs_commit="b" * 40)
 
-    def metric(self, recipe, paths, target, cargo, output, phase, cwd, arguments):
+    def metric(self, recipe, paths, target, cargo, output, phase, cwd, arguments, *, platform):
+        self.assertEqual(platform, self.platform)
         return dict(phase=phase, seconds=0.1, returncode=0, memory_peak_bytes=4096,
                     memory_events="oom_kill 0\n", oom_killed=False, tests_passed=2)
 
     def compile(self):
         return build.compile_exporter(self.lock, self.recipe, self.paths, self.output,
-                                      self.target, self.cargo, self.github)
+                                      self.target, self.cargo, self.github, self.platform)
 
     def test_identity_has_exact_worker_fields_and_actual_cargo_hashes(self):
-        identity = build.build_identity(self.lock, self.recipe, self.paths)
+        identity = build.build_identity(self.lock, self.recipe, self.paths, self.platform)
         self.assertEqual(set(identity), {"platform", "builder_image", "recipe", "sources",
                                          "cargo_locks", "output_settings"})
-        self.assertEqual(identity["platform"], "linux/amd64")
-        self.assertEqual(identity["builder_image"], self.recipe["amd64_builder_image"])
+        self.assertEqual(identity["platform"], self.platform)
+        self.assertEqual(identity["builder_image"], self.image)
         self.assertEqual(identity["recipe"], self.recipe)
         for actual, source in zip(identity["sources"], self.lock["sources"]):
             self.assertEqual(actual, {k: v for k, v in source.items() if k != "cache"})
         self.assertEqual(identity["cargo_locks"], {
             name: build.sha(path / "Cargo.lock") for name, path in self.paths.items()})
         (self.paths["libs"] / "Cargo.lock").write_text("changed")
-        self.assertNotEqual(identity, build.build_identity(self.lock, self.recipe, self.paths))
+        self.assertNotEqual(identity, build.build_identity(self.lock, self.recipe, self.paths, self.platform))
+
+    def test_architecture_changes_only_platform_and_builder_identity(self):
+        amd64 = build.build_identity(self.lock, self.recipe, self.paths)
+        arm64 = build.build_identity(self.lock, self.recipe, self.paths, "linux/arm64")
+        self.assertEqual(amd64["platform"], "linux/amd64")
+        self.assertEqual(amd64["builder_image"], self.recipe["amd64_builder_image"])
+        self.assertEqual(arm64, amd64 | {"platform": "linux/arm64", "builder_image": ExporterArm64Tests.image})
+
+    def test_cli_passes_selected_platform_to_compiler_and_package(self):
+        args = ["build_exporter.py", "--platform", self.platform, "--cache", str(self.root / "cache"),
+                "--output", str(self.output), "--dist", str(self.root / "dist")]
+        env = {"GITHUB_REPOSITORY": build.REPOSITORY, "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123"}
+        with patch("sys.argv", args), patch.dict(os.environ, env):
+            with patch.object(build, "verify_sources"), patch.object(build, "compile_exporter") as compiler:
+                with patch.object(build, "package") as package:
+                    build.main()
+        self.assertEqual(compiler.call_args.args[-1], self.platform)
+        self.assertEqual(package.call_args.args, (self.output, self.root / "dist", self.platform))
+
+    def test_unsupported_platform_is_rejected_before_docker(self):
+        with patch.object(build.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "unsupported exporter platform"):
+                build.run_phase(self.recipe, self.paths, self.target, self.cargo, self.output,
+                                "build", "/work/vectorcraft", self.recipe["build"], platform="linux/riscv64")
+        run.assert_not_called()
 
     def test_all_five_exact_recipe_phases_receipt_and_allowlisted_archive(self):
         with patch.object(build, "run_phase", side_effect=self.metric) as phase:
@@ -67,6 +97,10 @@ class ExporterTests(unittest.TestCase):
         for call, test in zip(calls[1:], self.recipe["tests"]):
             self.assertEqual(call.args[-2:], (test[0], test[1:]))
         self.assertEqual(receipt["github"], self.github)
+        self.assertEqual(receipt["platform"], self.platform)
+        self.assertEqual(receipt["builder_image"], self.image)
+        self.assertEqual(receipt["identity"], build.build_identity(
+            self.lock, self.recipe, self.paths, self.platform))
         self.assertEqual(receipt["rust_tests"], "passed")
         self.assertEqual(receipt["binary_sha256"], build.sha(self.output / "vectorcraft-cli"))
         self.assertEqual(receipt["source_lock_sha256"], build.sha(build.HERE / "source.lock.json"))
@@ -76,8 +110,8 @@ class ExporterTests(unittest.TestCase):
         (self.output / "artwork.svg").write_text("must not ship")
         (self.output / "runtime.tar.gz").write_text("must not ship")
         dist = self.root / "dist"
-        build.package(self.output, dist)
-        archive = dist / "exporter-linux-amd64.tar.gz"
+        build.package(self.output, dist, self.platform)
+        archive = dist / ("exporter-" + self.platform.replace("/", "-") + ".tar.gz")
         with tarfile.open(archive) as tar:
             self.assertEqual(tar.getnames(), list(build.FILES))
             self.assertEqual(len(tar.getnames()), 4)
@@ -155,8 +189,8 @@ class ExporterTests(unittest.TestCase):
             with self.subTest(group=number):
                 (self.output / "exporter-build.json").write_text("stale successful receipt")
 
-                def metric(*args):
-                    result = self.metric(*args)
+                def metric(*args, **kwargs):
+                    result = self.metric(*args, **kwargs)
                     if result["phase"] == "test-" + str(number):
                         result["tests_passed"] = 0
                     return result
@@ -170,8 +204,8 @@ class ExporterTests(unittest.TestCase):
     def test_failed_oom_or_unmeasured_phase_stops_publication(self):
         for overrides in ({"returncode": 101}, {"oom_killed": True}, {"memory_peak_bytes": None}):
             with self.subTest(overrides=overrides):
-                def metric(*args):
-                    return self.metric(*args) | overrides
+                def metric(*args, **kwargs):
+                    return self.metric(*args, **kwargs) | overrides
 
                 with patch.object(build, "run_phase", side_effect=metric) as phase:
                     with self.assertRaises(RuntimeError):
@@ -180,11 +214,14 @@ class ExporterTests(unittest.TestCase):
                 self.assertFalse((self.output / "exporter-build.json").exists())
 
     def test_wrong_binary_architecture_is_rejected(self):
-        (self.target / "debug/vectorcraft-cli").write_bytes(b"not an amd64 ELF")
-        with patch.object(build, "run_phase", side_effect=self.metric):
-            with self.assertRaisesRegex(ValueError, "amd64 ELF"):
-                self.compile()
-        self.assertFalse((self.output / "exporter-build.json").exists())
+        wrong_machine = b"\xb7\x00" if self.machine == b"\x3e\x00" else b"\x3e\x00"
+        for header in (b"not an ELF", b"\x7fELF\x02\x01" + bytes(12) + wrong_machine):
+            with self.subTest(header=header):
+                (self.target / "debug/vectorcraft-cli").write_bytes(header)
+                with patch.object(build, "run_phase", side_effect=self.metric):
+                    with self.assertRaisesRegex(ValueError, self.platform.split("/")[1] + " ELF"):
+                        self.compile()
+                self.assertFalse((self.output / "exporter-build.json").exists())
 
     def test_test_parser_requires_positive_passes_not_filtered_or_ignored(self):
         self.assertEqual(build.test_count("test result: ok. 0 passed; 99 ignored; 12 filtered out"), 0)
@@ -220,10 +257,12 @@ class ExporterTests(unittest.TestCase):
         with patch.object(build.subprocess, "run", side_effect=fake_run) as run:
             with patch.object(build.subprocess, "check_output", return_value='{"OOMKilled": false, "ExitCode": 0}'):
                 metric = build.run_phase(self.recipe, self.paths, self.target, self.cargo, self.output,
-                                         "test-1", "/work/vectorcraft", self.recipe["tests"][0][1:])
+                                         "test-1", "/work/vectorcraft", self.recipe["tests"][0][1:],
+                                         platform=self.platform)
         command = run.call_args_list[0].args[0]
-        for option in ("--cpus=2", "--memory=4g", "--memory-swap=4g", "linux/amd64",
-                       self.recipe["amd64_builder_image"], str(self.paths["libs"]) + ":/work/libs:ro",
+        for option in ("--cpus=2", "--memory=4g", "--memory-swap=4g", self.platform,
+                       self.image, "--user=" + str(os.getuid()) + ":" + str(os.getgid()),
+                       str(self.paths["libs"]) + ":/work/libs:ro",
                        str(self.paths["vectorcraft"]) + ":/work/vectorcraft:ro"):
             self.assertIn(option, command)
         self.assertEqual(command[-len(self.recipe["cargo"] + self.recipe["tests"][0][1:]):],
@@ -238,10 +277,16 @@ class ExporterTests(unittest.TestCase):
         with patch.object(build.subprocess, "run", return_value=subprocess.CompletedProcess([], 137, "")):
             with patch.object(build.subprocess, "check_output", return_value='{"OOMKilled": true, "ExitCode": 137}'):
                 metric = build.run_phase(self.recipe, self.paths, self.target, self.cargo, self.output,
-                                         "build", "/work/vectorcraft", self.recipe["build"])
+                                         "build", "/work/vectorcraft", self.recipe["build"], platform=self.platform)
         self.assertTrue(metric["oom_killed"])
         self.assertEqual(metric["returncode"], 137)
         self.assertIsNone(metric["memory_peak_bytes"])
+
+
+class ExporterArm64Tests(ExporterTests):
+    platform = "linux/arm64"
+    image = "rust:1.95-slim-bookworm@sha256:d81582a30689ffafaa04e2a9e117d39cc5032cb12eee8d6a5f26b1f215c1e3e8"
+    machine = b"\xb7\x00"
 
 
 if __name__ == "__main__":
